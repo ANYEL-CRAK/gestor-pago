@@ -249,7 +249,7 @@ footer { box-shadow: 0 -4px 18px rgba(15,23,42,.035); }
                                     <th class="py-3 px-3">Moneda</th>
                                     <th class="py-3 px-3">Cant</th>
                                     <th class="py-3 px-3">Detalle / Precio</th>
-                                    
+                                    <th class="py-3 px-3">Fecha</th>
                                     <th class="py-3 px-3">Total</th>
                                     <th class="py-3 px-2 text-center no-print">Acciones</th>
                                 </tr>
@@ -421,7 +421,6 @@ footer { box-shadow: 0 -4px 18px rgba(15,23,42,.035); }
                 if (percent) percent.textContent = progress + '%';
             };
 
-            // Progreso inicial mientras el navegador prepara la interfaz.
             setProgress(12);
             const progressTimer = setInterval(() => {
                 if (progress < 88) {
@@ -489,9 +488,6 @@ footer { box-shadow: 0 -4px 18px rgba(15,23,42,.035); }
 
         let inventory = JSON.parse(localStorage.getItem('inventory')) || defaultInventory;
 
-        // Estado base del inicio del turno. Las operaciones del día se calculan encima
-        // de este estado para que borrar una operación NO destruya el inventario/deudas
-        // que vienen del día anterior.
         let dayStartInventory = JSON.parse(localStorage.getItem('dayStartInventory')) || null;
         let dayStartLoans = JSON.parse(localStorage.getItem('dayStartLoans')) || null;
 
@@ -559,9 +555,6 @@ footer { box-shadow: 0 -4px 18px rgba(15,23,42,.035); }
             normalizeOperationDates();
             normalizeLoanLots();
 
-            // Si es una instalación/actualización antigua y no existe una base de turno,
-            // tomamos el estado actual como base solamente cuando no hay operaciones.
-            // Así no alteramos datos históricos existentes.
             if (!dayStartInventory && operations.length === 0) {
                 dayStartInventory = cloneState(inventory);
                 dayStartLoans = cloneState(loans);
@@ -995,7 +988,7 @@ footer { box-shadow: 0 -4px 18px rgba(15,23,42,.035); }
 
                     costOfSold = qty * inv.avgPrice;
                     profitGenerated = total - costOfSold;
-                    loanAvgPrice = inv.avgPrice; // conservar el costo unitario histórico de la venta
+                    loanAvgPrice = inv.avgPrice;
 
                     inv.qty -= qty;
                     if (inv.qty <= 0) {
@@ -1047,17 +1040,7 @@ footer { box-shadow: 0 -4px 18px rgba(15,23,42,.035); }
             const confirmed = await showCustomConfirm('⚠️ ELIMINAR OPERACIÓN', `Vas a eliminar <b>${op.type}</b> de <b>${op.currency}</b> (${Number(op.qty || 0).toLocaleString('en-US', {maximumFractionDigits: 2})}).<br><br>Esta operación puede afectar operaciones posteriores. El sistema reconstruirá automáticamente inventario, caja y préstamos/deudas.`, 'Sí, eliminar', true);
             if (!confirmed) return;
 
-            // IMPORTANTE: después de exportar, dayStartInventory/dayStartLoans son la
-            // fotografía del estado real con el que comenzó el nuevo turno. Esa fotografía
-            // es inmutable durante el turno y es SIEMPRE el punto de reconstrucción.
-            // Nunca debemos sustituirla por el inventario actual (que ya contiene la
-            // operación que estamos eliminando), porque eso puede hacer que el estado
-            // termine reconstruido como si la app empezara desde cero.
             if (!dayStartInventory) {
-                // Compatibilidad con instalaciones antiguas que todavía no tenían una
-                // base guardada. Se conserva el estado actual como base de emergencia y
-                // se persiste inmediatamente para que las siguientes eliminaciones sean
-                // estables.
                 dayStartInventory = cloneState(inventory);
                 dayStartLoans = cloneState(loans);
                 localStorage.setItem('dayStartInventory', JSON.stringify(dayStartInventory));
@@ -1077,10 +1060,7 @@ footer { box-shadow: 0 -4px 18px rgba(15,23,42,.035); }
             showToast('Operación eliminada.', 'success');
         }
 
-
         function recalculateInventoryFromOperations() {
-            // Partimos del estado al inicio del turno y aplicamos únicamente las
-            // operaciones de este turno. Nunca reconstruimos desde cero.
             const baseInventory = dayStartInventory ? cloneState(dayStartInventory) : cloneState(inventory);
             const baseLoans = dayStartLoans ? cloneState(dayStartLoans) : cloneState(loans);
 
@@ -1185,7 +1165,7 @@ footer { box-shadow: 0 -4px 18px rgba(15,23,42,.035); }
                         }
                         op.totalImpact = payQty;
                     } else if (direction === 'pago' && currentQ < 0) {
-                        currentQ += payQty;
+                        currentQ -= payQty;
                         if (op.currency !== 'CUP' && inv) {
                             inv.qty -= payQty;
                             if (inv.qty < 0) inv.qty = 0;
@@ -1310,678 +1290,440 @@ footer { box-shadow: 0 -4px 18px rgba(15,23,42,.035); }
             const container = document.getElementById('loansCardsContainer');
             container.innerHTML = '';
             const persons = Object.keys(loans);
+            
             if (persons.length === 0) {
-                container.innerHTML = `<div class="col-span-full text-center py-8 text-gray-400 text-xs">No hay préstamos ni deudas registradas.</div>`;
+                container.innerHTML = `<div class="col-span-full text-center py-12 text-gray-400 font-medium">No hay préstamos o deudas registrados.</div>`;
                 return;
             }
 
             persons.forEach(person => {
-                const curBalances = loans[person];
-                let balancesHTML = '';
-                Object.keys(curBalances).forEach(cur => {
-                    const item = curBalances[cur];
-                    const amt = (typeof item === 'object' && item !== null) ? item.qty : item;
-                    if (Math.abs(amt) < 0.000001) return;
-                    const isDebt = amt < 0;
-                    const colorClass = isDebt ? 'text-rose-400' : 'text-emerald-400';
-                    const panelClass = isDebt ? 'bg-rose-950/30 border-rose-900/50' : 'bg-emerald-950/30 border-emerald-900/50';
-                    const labelText = isDebt ? 'LE DEBES' : 'TE DEBE';
-                    const entry = typeof item === 'object' && item !== null ? ensureLoanLots(item, item.avgPrice || 0) : { qty: amt, avgPrice: 0, lots: [] };
-                    const summary = getLoanLotSummary(entry);
-                    const avgText = cur === 'CUP' ? '' : `<span class="text-[10px] text-gray-400">Promedio histórico: $ ${summary.avgPrice.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}</span>`;
-                    balancesHTML += `
-                        <div class="rounded-xl border ${panelClass} px-3 py-2.5 mb-2">
-                            <div class="flex justify-between items-center">
-                                <span class="font-bold ${colorClass}">${cur}</span>
-                                <span class="text-[9px] font-extrabold tracking-wider ${colorClass}">${labelText}</span>
+                const personLoans = loans[person];
+                if (!personLoans || Object.keys(personLoans).length === 0) return;
+
+                let itemsHtml = '';
+                Object.entries(personLoans).forEach(([currency, entry]) => {
+                    const q = typeof entry === 'number' ? entry : entry.qty;
+                    if (!q || Math.abs(q) < 0.000001) return;
+                    const avg = (typeof entry === 'object' && entry.avgPrice) ? entry.avgPrice : 0;
+                    const isTeDebe = q > 0;
+                    const absQ = Math.abs(q);
+
+                    itemsHtml += `
+                        <div class="flex items-center justify-between text-xs py-2 border-b border-gray-100 dark:border-gray-800/60 last:border-0">
+                            <div class="flex flex-col">
+                                <span class="font-bold ${isTeDebe ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400'}">
+                                    ${isTeDebe ? 'Te debe' : 'Le debes'}: ${absQ.toLocaleString('en-US', {maximumFractionDigits: 2})} ${currency}
+                                </span>
+                                ${avg > 0 ? `<span class="text-[10px] text-gray-400">Prom: $${avg.toFixed(2)}</span>` : ''}
                             </div>
-                            <div class="flex justify-between items-end mt-1">
-                                <span class="text-sm font-extrabold ${colorClass}">${Math.abs(amt).toLocaleString('en-US', {maximumFractionDigits: 2})}</span>
-                                ${avgText}
-                            </div>
-                        </div>`;
+                            <button onclick="abonoLoan('${person.replace(/'/g, "\\'")}', '${currency}', ${isTeDebe ? "'cobro'" : "'pago'"})" class="text-[11px] font-bold bg-indigo-50 dark:bg-indigo-950/50 hover:bg-indigo-100 dark:hover:bg-indigo-900 text-indigo-600 dark:text-indigo-400 px-2.5 py-1 rounded-lg border border-indigo-200 dark:border-indigo-800/80 transition">
+                                Abonar
+                            </button>
+                        </div>
+                    `;
                 });
+
+                if (!itemsHtml) return;
+
                 const card = document.createElement('div');
-                card.className = 'bg-white dark:bg-gray-900 p-4 rounded-2xl border dark:border-gray-800 shadow-sm flex flex-col justify-between cursor-pointer hover:border-indigo-500 transition';
-                card.onclick = () => openPersonModal(person);
+                card.className = "bg-white dark:bg-gray-900 p-4 rounded-2xl border dark:border-gray-800 shadow-sm flex flex-col justify-between";
                 card.innerHTML = `
                     <div>
-                        <div class="flex items-center justify-between mb-3">
-                            <h3 class="font-bold text-sm text-indigo-600 dark:text-indigo-400">👤 ${person}</h3>
-                            <span class="text-[10px] bg-gray-100 dark:bg-gray-800 px-2.5 py-1 rounded-full text-gray-500 dark:text-gray-400 font-medium">Ver detalles</span>
+                        <div class="flex items-center justify-between mb-3 pb-2 border-b dark:border-gray-800">
+                            <div class="flex items-center gap-2">
+                                <span class="text-base">👤</span>
+                                <h3 class="font-bold text-sm text-gray-800 dark:text-gray-100">${person}</h3>
+                            </div>
+                            <button onclick="openPersonModal('${person.replace(/'/g, "\\'")}')" class="text-xs font-semibold text-indigo-500 hover:text-indigo-600 dark:text-indigo-400 hover:underline">
+                                Ver historial
+                            </button>
                         </div>
-                        <div>${balancesHTML}</div>
-                    </div>`;
+                        <div class="space-y-1">
+                            ${itemsHtml}
+                        </div>
+                    </div>
+                `;
                 container.appendChild(card);
             });
         }
 
-        function openPersonModal(person) {
-            document.getElementById('personModalTitle').innerText = `👤 Perfil de: ${person}`;
-            const content = document.getElementById('personModalContent');
+        async function abonoLoan(person, currency, direction) {
+            const entry = loans[person] ? loans[person][currency] : null;
+            if (!entry) return;
+            const currentQ = Math.abs(typeof entry === 'number' ? entry : entry.qty);
             
-            const curBalances = loans[person] || {};
-            let balancesSummary = '';
-            
-            let suggestedCurrency = '';
-            let suggestedAmount = '';
-            let isFirstFound = false;
+            const promptText = `Ingresa la cantidad a ${direction === 'cobro' ? 'cobrar' : 'pagar'} de ${currency} para ${person}\n(Pendiente: ${currentQ.toLocaleString('en-US', {maximumFractionDigits: 2})} ${currency}):`;
+            const inputVal = prompt(promptText);
+            if (inputVal === null) return;
 
-            Object.keys(curBalances).forEach(cur => {
-                const item = curBalances[cur];
-                const amt = (typeof item === 'object' && item !== null) ? item.qty : item;
-                if (amt === 0) return;
-                
-                if (!isFirstFound) {
-                    suggestedCurrency = cur;
-                    suggestedAmount = Math.abs(amt);
-                    isFirstFound = true;
-                }
-
-                const status = amt > 0 ? 'Te debe' : 'Le debes';
-                const entry = (typeof item === 'object' && item !== null) ? ensureLoanLots(item, item.avgPrice || 0) : { qty: amt, avgPrice: 0, lots: [] };
-                const summary = getLoanLotSummary(entry);
-                const lotCount = summary.lots.length;
-                const avgLine = cur === 'CUP' ? '' : `<div class="text-[10px] text-gray-400 mt-1">Costo histórico medio: $ ${summary.avgPrice.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})} · ${lotCount} lote${lotCount === 1 ? '' : 's'}</div>`;
-                const lotsLine = cur === 'CUP' || !summary.lots.length ? '' : `<div class="mt-1 text-[9px] text-gray-500">Lotes: ${summary.lots.map(l => `${l.qty.toLocaleString('en-US')} @ $${l.avgPrice.toLocaleString('en-US', {maximumFractionDigits: 2})}`).join(' · ')}</div>`;
-                balancesSummary += `<div class="py-2 bg-gray-800/60 px-3 rounded-xl border border-gray-700/50"><div class="flex justify-between text-xs font-semibold"><span>${cur}: ${Math.abs(amt).toLocaleString()}</span><span class="text-indigo-400 font-medium">${status}</span></div>${avgLine}${lotsLine}</div>`;
-            });
-
-            const abonoCurrenciesOptions = [...currencies, 'CUP'].map(c => {
-                const isSelected = c === suggestedCurrency ? 'selected' : '';
-                return `<option value="${c}" ${isSelected} class="dark:bg-gray-900">${c}</option>`;
-            }).join('');
-
-            content.innerHTML = `
-                <div class="space-y-2">
-                    <h4 class="text-[11px] font-bold text-gray-400 uppercase tracking-wider">Balance Actual</h4>
-                    <div class="space-y-1.5">${balancesSummary}</div>
-                </div>
-                <div class="pt-3 border-t border-gray-800 space-y-2">
-                    <h4 class="text-[11px] font-bold text-gray-400 uppercase tracking-wider">Detalle histórico</h4>
-                    <div class="text-[10px] text-gray-400 leading-relaxed">Cada préstamo en moneda extranjera conserva su precio promedio histórico. Al cobrar, se recupera el costo de sus lotes y se recalcula el promedio general del inventario.</div>
-                </div>
-                <div class="pt-3 border-t border-gray-800 space-y-3">
-                    <h4 class="text-[11px] font-bold text-gray-400 uppercase tracking-wider">Registrar Abono / Pago</h4>
-                    <div class="grid grid-cols-2 gap-2">
-                        <div>
-                            <label class="block text-[10px] font-semibold text-gray-400 mb-1">MONEDA</label>
-                            <select id="abonoCurrency" class="w-full bg-gray-800 border border-gray-700 rounded-xl p-2 text-xs text-gray-200 focus:outline-none cursor-pointer">
-                                ${abonoCurrenciesOptions}
-                            </select>
-                        </div>
-                        <div>
-                            <label class="block text-[10px] font-semibold text-gray-400 mb-1">CANTIDAD ABONADA</label>
-                            <input type="number" id="abonoQty" value="${suggestedAmount}" step="any" placeholder="0" class="w-full bg-gray-800 border border-gray-700 rounded-xl p-2 text-xs text-gray-200 focus:outline-none">
-                        </div>
-                    </div>
-                    <button onclick="registerAbono('${person}')" class="w-full bg-emerald-600 hover:bg-emerald-500 text-white font-semibold py-2.5 rounded-xl text-xs transition shadow-lg">
-                        Registrar Abono
-                    </button>
-                </div>
-            `;
-            document.getElementById('personModal').classList.remove('hidden');
-            document.getElementById('personModal').classList.add('flex');
-        }
-
-        function registerAbono(person) {
-            const currency = document.getElementById('abonoCurrency').value;
-            const requestedQty = parseFloat(document.getElementById('abonoQty').value);
-
-            if (isNaN(requestedQty) || requestedQty <= 0) {
-                showToast('Ingrese una cantidad válida.', 'error');
+            const qty = parseFloat(inputVal);
+            if (isNaN(qty) || qty <= 0) {
+                showToast('Monto inválido', 'error');
+                return;
+            }
+            if (qty > currentQ + 0.000001) {
+                showToast(`El monto no puede superar lo pendiente (${currentQ})`, 'error');
                 return;
             }
 
-            const rawEntry = loans[person] && loans[person][currency];
-            if (rawEntry === undefined) {
-                showToast('No existe una deuda o préstamo pendiente con esta persona en esa moneda.', 'error');
-                return;
-            }
-
-            const loanEntry = ensureLoanLots(
-                typeof rawEntry === 'object' && rawEntry !== null ? rawEntry : { qty: rawEntry, avgPrice: 0 },
-                typeof rawEntry === 'object' ? rawEntry.avgPrice : 0
-            );
-            let currentBalance = Number(loanEntry.qty) || 0;
-            if (Math.abs(currentBalance) < 0.000001) {
-                showToast('No existe un saldo pendiente para registrar este abono.', 'error');
-                return;
-            }
-
-            const direction = currentBalance > 0 ? 'cobro' : 'pago';
-            const appliedQty = Math.min(requestedQty, Math.abs(currentBalance));
-            let cashImpact = 0;
-            let returnedCost = 0;
-            let lotAllocations = [];
-            let loanAvgPrice = loanEntry.avgPrice || 0;
-            let inv = inventory[currency];
-
-            if (direction === 'pago') {
-                if (currency === 'CUP') {
-                    const availableCUP = getAvailableCUP();
-                    if (availableCUP < appliedQty) {
-                        showToast(`Monto insuficiente en CUP para abonar. Disponible: $ ${availableCUP.toLocaleString('en-US')}`, 'error');
-                        return;
-                    }
-                } else {
-                    inv = inv || (inventory[currency] = { qty: 0, totalCost: 0, avgPrice: 0, boughtToday: 0, soldTodayQty: 0 });
-                    if (inv.qty < appliedQty) {
-                        showToast(`Saldo insuficiente de ${currency} para abonar. Disponible: ${inv.qty.toLocaleString('en-US')}`, 'error');
-                        return;
-                    }
-                }
-                const consumed = consumeLoanLots(loanEntry, appliedQty);
-                lotAllocations = consumed.allocations;
-                returnedCost = consumed.cost;
-                loanAvgPrice = appliedQty > 0 ? returnedCost / appliedQty : loanEntry.avgPrice;
-                loanEntry.qty += appliedQty;
-                if (currency !== 'CUP') {
-                    inv.qty -= appliedQty;
-                    if (inv.qty < 0) inv.qty = 0;
-                    inv.totalCost = inv.qty * inv.avgPrice;
-                }
-                cashImpact = -appliedQty;
-            } else {
-                const consumed = consumeLoanLots(loanEntry, appliedQty);
-                lotAllocations = consumed.allocations;
-                returnedCost = consumed.cost;
-                loanAvgPrice = appliedQty > 0 ? returnedCost / appliedQty : loanEntry.avgPrice;
-                loanEntry.qty -= appliedQty;
-                if (currency !== 'CUP') {
-                    inv = inv || (inventory[currency] = { qty: 0, totalCost: 0, avgPrice: 0, boughtToday: 0, soldTodayQty: 0 });
-                    inv.qty += appliedQty;
-                    inv.totalCost += returnedCost;
-                    inv.avgPrice = inv.qty > 0 ? inv.totalCost / inv.qty : 0;
-                }
-                cashImpact = appliedQty;
-            }
-
-            if (Math.abs(loanEntry.qty) < 0.000001) {
-                delete loans[person][currency];
-            } else {
-                const summary = getLoanLotSummary(loanEntry);
-                loanEntry.avgPrice = currency === 'CUP' ? 0 : summary.avgPrice;
-                loans[person][currency] = loanEntry;
-            }
-            if (loans[person] && Object.keys(loans[person]).length === 0) delete loans[person];
-
-            const operation = {
+            const op = {
                 id: getNextOperationId(),
                 createdAt: new Date().toISOString(),
                 type: 'Abono',
                 currency,
-                qty: appliedQty,
-                requestedQty,
-                appliedQty,
+                qty,
                 price: 0,
-                total: appliedQty,
-                totalImpact: cashImpact,
+                total: currency === 'CUP' ? qty : (qty * (entry.avgPrice || 0)),
                 profit: 0,
-                person: `${person} (Abono)`,
-                direction,
-                loanAvgPrice: currency === 'CUP' ? 0 : loanAvgPrice,
-                returnedCost,
-                lotAllocations
+                person: person,
+                direction: direction,
+                appliedQty: qty,
+                requestedQty: qty
             };
 
-            operations.unshift(operation);
+            operations.unshift(op);
+            recalculateInventoryFromOperations();
             saveData();
             render();
             renderLoans();
-            closePersonModal();
+            showToast('Abono registrado exitosamente.', 'success');
+        }
 
-            const avgText = currency === 'CUP' ? '' : ` · Costo histórico: $ ${loanAvgPrice.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
-            const invAvgText = currency === 'CUP' ? '' : ` · Nuevo promedio: $ ${(inventory[currency]?.avgPrice || 0).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
-            showToast(`${direction === 'cobro' ? 'Cobro' : 'Pago'} registrado${avgText}${invAvgText}`, 'success');
+        function openModal(cur) {
+            const inv = inventory[cur] || { qty: 0, totalCost: 0, avgPrice: 0, boughtToday: 0, soldTodayQty: 0 };
+            document.getElementById('modalTitle').innerText = `🚀 DETALLE DE ${cur}`;
+            const content = document.getElementById('modalContent');
+            
+            const curOps = operations.filter(o => o.currency === cur);
+
+            content.innerHTML = `
+                <div class="grid grid-cols-2 gap-2 mb-4 bg-gray-800/60 p-3 rounded-2xl border border-gray-700/60">
+                    <div>
+                        <span class="text-[10px] text-gray-400 block font-semibold">CANTIDAD EN CAJA</span>
+                        <span class="text-sm font-bold text-indigo-400">${inv.qty.toLocaleString('en-US', {maximumFractionDigits: 2})}</span>
+                    </div>
+                    <div>
+                        <span class="text-[10px] text-gray-400 block font-semibold">PRECIO PROMEDIO</span>
+                        <span class="text-sm font-bold text-emerald-400">$ ${inv.avgPrice.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}</span>
+                    </div>
+                    <div>
+                        <span class="text-[10px] text-gray-400 block font-semibold">COSTO TOTAL</span>
+                        <span class="text-sm font-bold text-amber-400">$ ${inv.totalCost.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}</span>
+                    </div>
+                    <div>
+                        <span class="text-[10px] text-gray-400 block font-semibold">COMPRADO HOY</span>
+                        <span class="text-sm font-bold text-blue-400">${(inv.boughtToday || 0).toLocaleString('en-US', {maximumFractionDigits: 2})}</span>
+                    </div>
+                </div>
+                <h4 class="font-bold text-xs text-gray-300 uppercase tracking-wider mb-2">Últimos Movimientos (${curOps.length})</h4>
+                <div class="space-y-1.5 max-h-48 overflow-y-auto pr-1">
+                    ${curOps.length === 0 ? '<p class="text-gray-500 text-xs text-center py-2">Sin operaciones registradas</p>' : curOps.map(op => `
+                        <div class="flex items-center justify-between p-2 rounded-xl bg-gray-800/40 border border-gray-800 text-xs">
+                            <div>
+                                <span class="font-bold ${op.type === 'Compra' ? 'text-rose-400' : op.type === 'Venta' ? 'text-emerald-400' : 'text-amber-400'}">${op.type}</span>
+                                <span class="text-gray-400 text-[10px] ml-1">${formatOperationDate(op)}</span>
+                            </div>
+                            <div class="font-semibold">
+                                ${op.qty} @ ${op.price ? '$' + op.price : '-'}
+                            </div>
+                        </div>
+                    `).join('')}
+                </div>
+            `;
+
+            const modal = document.getElementById('detailModal');
+            modal.classList.remove('hidden');
+            modal.classList.add('flex');
+        }
+
+        function closeModal() {
+            const modal = document.getElementById('detailModal');
+            modal.classList.remove('flex');
+            modal.classList.add('hidden');
+        }
+
+        function openProfitModal() {
+            const content = document.getElementById('profitModalContent');
+            const totalProfit = operations.reduce((sum, op) => sum + (op.profit || 0), 0);
+            const salesOps = operations.filter(o => o.type === 'Venta');
+            const expenseOps = operations.filter(o => o.type === 'Gasto');
+            
+            const salesProfitTotal = salesOps.reduce((sum, o) => sum + (o.profit || 0), 0);
+            const expensesTotal = expenseOps.reduce((sum, o) => sum + (o.total || 0), 0);
+
+            const profitByCurrency = {};
+            salesOps.forEach(op => {
+                if (!profitByCurrency[op.currency]) profitByCurrency[op.currency] = 0;
+                profitByCurrency[op.currency] += (op.profit || 0);
+            });
+
+            content.innerHTML = `
+                <div class="bg-gray-800/60 p-4 rounded-2xl border border-gray-700/60 mb-4 space-y-2">
+                    <div class="flex justify-between items-center text-xs">
+                        <span class="text-gray-400">Ganancia Bruta por Ventas:</span>
+                        <span class="font-bold text-emerald-400">$ ${salesProfitTotal.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}</span>
+                    </div>
+                    <div class="flex justify-between items-center text-xs">
+                        <span class="text-gray-400">Total de Gastos:</span>
+                        <span class="font-bold text-rose-400">- $ ${expensesTotal.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}</span>
+                    </div>
+                    <div class="border-t border-gray-700 pt-2 flex justify-between items-center text-sm">
+                        <span class="font-bold text-gray-200">Ganancia Neta Total:</span>
+                        <span class="font-extrabold ${totalProfit >= 0 ? 'text-emerald-400' : 'text-rose-400'}">$ ${totalProfit.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}</span>
+                    </div>
+                </div>
+
+                <h4 class="font-bold text-xs text-gray-300 uppercase tracking-wider mb-2">Ganancias por Moneda (Ventas)</h4>
+                <div class="space-y-1.5 mb-4">
+                    ${Object.keys(profitByCurrency).length === 0 ? '<p class="text-gray-500 text-xs">Sin ventas registradas</p>' : Object.entries(profitByCurrency).map(([cur, prof]) => `
+                        <div class="flex justify-between items-center p-2 rounded-xl bg-gray-800/40 border border-gray-800 text-xs">
+                            <span class="font-bold text-indigo-300">${cur}</span>
+                            <span class="font-semibold ${prof >= 0 ? 'text-emerald-400' : 'text-rose-400'}">$ ${prof.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}</span>
+                        </div>
+                    `).join('')}
+                </div>
+            `;
+
+            const modal = document.getElementById('profitModal');
+            modal.classList.remove('hidden');
+            modal.classList.add('flex');
+        }
+
+        function closeProfitModal() {
+            const modal = document.getElementById('profitModal');
+            modal.classList.remove('flex');
+            modal.classList.add('hidden');
+        }
+
+        function openPersonModal(person) {
+            document.getElementById('personModalTitle').innerText = `🤝 Perfil: ${person}`;
+            const content = document.getElementById('personModalContent');
+
+            const personOps = operations.filter(o => o.person === person || (o.person && o.person.startsWith(person)));
+            const personLoans = loans[person] || {};
+
+            let balancesHtml = '';
+            Object.entries(personLoans).forEach(([cur, entry]) => {
+                const q = typeof entry === 'number' ? entry : entry.qty;
+                if (Math.abs(q) < 0.000001) return;
+                const isTeDebe = q > 0;
+                const avg = (typeof entry === 'object' && entry.avgPrice) ? entry.avgPrice : 0;
+                balancesHtml += `
+                    <div class="flex justify-between items-center p-2 rounded-xl ${isTeDebe ? 'bg-emerald-950/40 border-emerald-800/50' : 'bg-rose-950/40 border-rose-800/50'} border text-xs">
+                        <span class="font-bold">${cur}: ${isTeDebe ? 'Te debe' : 'Le debes'}</span>
+                        <span class="font-extrabold ${isTeDebe ? 'text-emerald-400' : 'text-rose-400'}">${Math.abs(q).toLocaleString('en-US', {maximumFractionDigits: 2})} ${cur} ${avg > 0 ? `(Prom: $${avg.toFixed(2)})` : ''}</span>
+                    </div>
+                `;
+            });
+
+            content.innerHTML = `
+                <div class="mb-4">
+                    <h4 class="font-bold text-xs text-gray-400 uppercase tracking-wider mb-2">Estado de Cuenta Actual</h4>
+                    <div class="space-y-1.5">
+                        ${balancesHtml || '<p class="text-gray-500 text-xs">Saldos al día (Sin deudas pendientes)</p>'}
+                    </div>
+                </div>
+
+                <div>
+                    <h4 class="font-bold text-xs text-gray-400 uppercase tracking-wider mb-2">Historial de Transacciones</h4>
+                    <div class="space-y-2 max-h-56 overflow-y-auto pr-1">
+                        ${personOps.length === 0 ? '<p class="text-gray-500 text-xs">Sin historial de operaciones</p>' : personOps.map(op => `
+                            <div class="p-2.5 rounded-xl bg-gray-800/50 border border-gray-800 text-xs">
+                                <div class="flex justify-between items-center font-bold mb-1">
+                                    <span class="${op.type === 'Préstamo' ? 'text-amber-400' : op.type === 'Deuda' ? 'text-purple-400' : 'text-blue-400'}">${op.type}</span>
+                                    <span class="text-gray-200">${op.qty}${op.currency}</span>
+                                </div>
+                                <div class="flex justify-between items-center text-[10px] text-gray-400">
+                                    <span>${formatOperationDate(op)}</span>                                     <span>Total: $ ${op.total ? op.total.toLocaleString('en-US', {maximumFractionDigits: 2}) : 0}</span>
+                                </div>
+                            </div>
+                        `).join('')}
+                    </div>
+                </div>
+            `;
+
+            const modal = document.getElementById('personModal');
+            modal.classList.remove('hidden');
+            modal.classList.add('flex');
         }
 
         function closePersonModal() {
-            document.getElementById('personModal').classList.remove('flex');
-            document.getElementById('personModal').classList.add('hidden');
-        }
-
-        function getAuditSnapshot(targetIndex) {
-            const snapInventory = {};
-            currencies.forEach(c => snapInventory[c] = { qty: 0, totalCost: 0, avgPrice: 0 });
-            const snapLoans = {};
-            const ordered = [...operations].reverse();
-            ordered.slice(0, targetIndex).forEach(op => {
-                const inv = snapInventory[op.currency] || (snapInventory[op.currency] = { qty: 0, totalCost: 0, avgPrice: 0 });
-                if (op.type === 'Compra') {
-                    inv.qty += op.qty; inv.totalCost += op.total; inv.avgPrice = inv.qty ? inv.totalCost / inv.qty : 0;
-                } else if (op.type === 'Venta' || op.type === 'Gasto' || op.type === 'Préstamo') {
-                    if (op.currency !== 'CUP') {
-                        inv.qty -= op.qty; if (inv.qty < 0) inv.qty = 0; inv.totalCost = inv.qty * inv.avgPrice;
-                    }
-                } else if (op.type === 'Deuda' && op.currency !== 'CUP') {
-                    inv.qty += op.qty; inv.totalCost = inv.qty * inv.avgPrice;
-                } else if (op.type === 'Abono' && op.currency !== 'CUP') {
-                    const person = (op.person || '').replace(' (Abono)', '');
-                    const bal = snapLoans[person]?.[op.currency] || 0;
-                    if (bal > 0) { inv.qty += op.appliedQty || op.qty; inv.totalCost += (op.returnedCost || (op.qty * (op.loanAvgPrice || 0))); inv.avgPrice = inv.qty ? inv.totalCost / inv.qty : 0; }
-                    else if (bal < 0) { inv.qty -= op.appliedQty || op.qty; if (inv.qty < 0) inv.qty = 0; inv.totalCost = inv.qty * inv.avgPrice; }
-                }
-                if (op.type === 'Préstamo' || op.type === 'Deuda') {
-                    const person = op.person;
-                    if (!snapLoans[person]) snapLoans[person] = {};
-                    snapLoans[person][op.currency] = (snapLoans[person][op.currency] || 0) + (op.type === 'Préstamo' ? op.qty : -op.qty);
-                } else if (op.type === 'Abono') {
-                    const person = (op.person || '').replace(' (Abono)', '');
-                    if (!snapLoans[person]) snapLoans[person] = {};
-                    const bal = snapLoans[person][op.currency] || 0;
-                    const q = op.appliedQty || op.qty;
-                    snapLoans[person][op.currency] = bal > 0 ? bal - q : bal + q;
-                }
-            });
-            return { inventory: snapInventory, loans: snapLoans };
+            const modal = document.getElementById('personModal');
+            modal.classList.remove('flex');
+            modal.classList.add('hidden');
         }
 
         function openOperationAudit(id) {
             const op = operations.find(o => o.id === id);
             if (!op) return;
-            const chronologicalIndex = [...operations].reverse().findIndex(o => o.id === id);
-            const before = getAuditSnapshot(chronologicalIndex);
-            const after = getAuditSnapshot(chronologicalIndex + 1);
-            const beforeInv = before.inventory[op.currency] || { qty: 0, avgPrice: 0, totalCost: 0 };
-            const afterInv = after.inventory[op.currency] || { qty: 0, avgPrice: 0, totalCost: 0 };
-            const money = n => `$ ${Number(n || 0).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
-            let calculation = '';
-            if (op.type === 'Compra') calculation = `${op.qty} × ${money(op.price)} = ${money(op.total)}. Nuevo promedio = (costo anterior + compra) ÷ cantidad total.`;
-            else if (op.type === 'Venta') calculation = `${op.qty} × ${money(op.avgPriceUsed)} = ${money(op.costOfSold)} de costo histórico. Ganancia = ${money(op.total)} − ${money(op.costOfSold)} = ${money(op.profit)}.`;
-            else if (op.type === 'Préstamo') calculation = `${op.qty} ${op.currency} salen del inventario al promedio histórico ${money(op.loanAvgPrice)} y quedan registrados como ${op.person}.`;
-            else if (op.type === 'Deuda') calculation = `${op.qty} ${op.currency} entran al inventario al promedio ${money(op.loanAvgPrice)} y se registra el saldo como deuda.`;
-            else if (op.type === 'Abono') calculation = `${op.direction === 'cobro' ? 'Cobro' : 'Pago'} de ${op.appliedQty || op.qty} ${op.currency}. ${op.lotAllocations?.length ? `Se aplicaron ${op.lotAllocations.length} lote(s) históricos.` : ''}`;
-            else if (op.type === 'Gasto') calculation = `Gasto registrado por ${money(op.total)}${op.currency !== 'CUP' ? `; reduce ${op.qty} ${op.currency} al promedio vigente.` : '.'}`;
-            const lotHtml = (op.lotAllocations || []).length ? `<div class="mt-2 space-y-1">${op.lotAllocations.map((l,i)=>`<div class="flex justify-between bg-gray-800/60 rounded-lg px-2 py-1"><span>Lote ${i+1}: ${l.qty.toLocaleString('en-US')} × ${money(l.avgPrice)}</span><span>${money(l.qty*l.avgPrice)}</span></div>`).join('')}</div>` : '';
-            document.getElementById('auditModalTitle').innerText = `🔍 Auditoría: ${op.type}`;
-            document.getElementById('auditModalContent').innerHTML = `
-                <div class="bg-gray-800/60 rounded-xl p-3 border border-gray-700/50"><div class="text-[10px] uppercase tracking-wider text-gray-400">Operación</div><div class="font-bold text-white mt-1">${op.currency} · ${op.qty.toLocaleString('en-US')} ${op.person ? `· ${op.person}` : ''}</div></div>
-                <div class="bg-cyan-950/20 rounded-xl p-3 border border-cyan-900/40"><div class="text-[10px] uppercase tracking-wider text-cyan-400">Cómo se calculó</div><div class="text-gray-200 mt-1 leading-relaxed">${calculation}</div>${lotHtml}</div>
-                <div class="grid grid-cols-2 gap-2">
-                    <div class="bg-gray-800/60 rounded-xl p-3 border border-gray-700/50"><div class="text-[10px] text-gray-400 uppercase">Antes</div><div class="font-bold mt-1">${beforeInv.qty.toLocaleString('en-US', {maximumFractionDigits:2})} ${op.currency}</div><div class="text-[10px] text-gray-400">Promedio: ${money(beforeInv.avgPrice)}</div></div>
-                    <div class="bg-gray-800/60 rounded-xl p-3 border border-gray-700/50"><div class="text-[10px] text-gray-400 uppercase">Después</div><div class="font-bold mt-1">${afterInv.qty.toLocaleString('en-US', {maximumFractionDigits:2})} ${op.currency}</div><div class="text-[10px] text-gray-400">Promedio: ${money(afterInv.avgPrice)}</div></div>
-                </div>`;
-            document.getElementById('auditModal').classList.remove('hidden');
-            document.getElementById('auditModal').classList.add('flex');
+
+            document.getElementById('auditModalTitle').innerText = `🔍 Auditoría de Operación #${op.id.toString().slice(-6)}`;
+            const content = document.getElementById('auditModalContent');
+
+            let extraDetails = '';
+            if (op.type === 'Venta') {
+                extraDetails = `
+                    <div class="bg-gray-800/60 p-3 rounded-2xl border border-gray-700/60 space-y-1 text-xs">
+                        <div class="flex justify-between text-gray-300"><span>Precio de Venta:</span><span class="font-bold">$ ${op.price}</span></div>
+                        <div class="flex justify-between text-gray-300"><span>Precio Promedio Costo:</span><span class="font-bold text-amber-400">$ ${op.avgPriceUsed ? op.avgPriceUsed.toFixed(2) : '0.00'}</span></div>
+                        <div class="flex justify-between text-gray-300"><span>Costo Total Vendido:</span><span class="font-bold text-rose-400">$ ${op.costOfSold ? op.costOfSold.toFixed(2) : '0.00'}</span></div>
+                        <div class="flex justify-between text-gray-300 border-t border-gray-700 pt-1"><span>Ganancia Generada:</span><span class="font-bold ${op.profit >= 0 ? 'text-emerald-400' : 'text-rose-400'}">$ ${op.profit ? op.profit.toFixed(2) : '0.00'}</span></div>
+                    </div>
+                `;
+            } else if (op.type === 'Compra') {
+                extraDetails = `
+                    <div class="bg-gray-800/60 p-3 rounded-2xl border border-gray-700/60 space-y-1 text-xs">
+                        <div class="flex justify-between text-gray-300"><span>Precio Unitario:</span><span class="font-bold">$ ${op.price}</span></div>
+                        <div class="flex justify-between text-gray-300"><span>Total Invertido (CUP):</span><span class="font-bold text-rose-400">$ ${op.total.toLocaleString('en-US')}</span></div>
+                    </div>
+                `;
+            } else if (op.type === 'Préstamo' || op.type === 'Deuda') {
+                extraDetails = `
+                    <div class="bg-gray-800/60 p-3 rounded-2xl border border-gray-700/60 space-y-1 text-xs">
+                        <div class="flex justify-between text-gray-300"><span>Persona:</span><span class="font-bold text-indigo-300">${op.person}</span></div>
+                        <div class="flex justify-between text-gray-300"><span>Precio Prom. Aplicado:</span><span class="font-bold">$ ${op.loanAvgPrice ? op.loanAvgPrice.toFixed(2) : '0.00'}</span></div>
+                    </div>
+                `;
+            }
+
+            content.innerHTML = `
+                <div class="space-y-3">
+                    <div class="flex justify-between items-center text-xs bg-gray-800/40 p-3 rounded-2xl border border-gray-800">
+                        <span class="font-bold uppercase text-indigo-400">${op.type} - ${op.currency}</span>
+                        <span class="text-gray-400">${formatOperationDate(op)}</span>
+                    </div>
+                    
+                    <div class="grid grid-cols-2 gap-2 text-xs">
+                        <div class="bg-gray-800/40 p-2.5 rounded-xl border border-gray-800">
+                            <span class="text-[10px] text-gray-400 block">CANTIDAD</span>
+                            <span class="font-bold text-gray-100">${op.qty.toLocaleString('en-US', {maximumFractionDigits: 2})}</span>
+                        </div>
+                        <div class="bg-gray-800/40 p-2.5 rounded-xl border border-gray-800">
+                            <span class="text-[10px] text-gray-400 block">TOTAL EQUIVALENTE</span>
+                            <span class="font-bold text-gray-100">$ ${op.total ? op.total.toLocaleString('en-US', {maximumFractionDigits: 2}) : '0.00'}</span>
+                        </div>
+                    </div>
+
+                    ${extraDetails}
+                </div>
+            `;
+
+            const modal = document.getElementById('auditModal');
+            modal.classList.remove('hidden');
+            modal.classList.add('flex');
         }
 
         function closeAuditModal() {
-            document.getElementById('auditModal').classList.remove('flex');
-            document.getElementById('auditModal').classList.add('hidden');
+            const modal = document.getElementById('auditModal');
+            modal.classList.remove('flex');
+            modal.classList.add('hidden');
         }
 
-        function openModal(currency) {
-            const inv = inventory[currency] || { qty: 0, totalCost: 0, avgPrice: 0, boughtToday: 0, soldTodayQty: 0 };
-            let boughtTodayVal = inv.boughtToday || 0;
-            let soldTodayVal = inv.soldTodayQty || 0;
-            let profitCurrency = operations.filter(op => op.currency === currency).reduce((acc, op) => acc + (op.profit || 0), 0);
-            const displayAvgPrice = inv.qty > 0 ? `$ ${inv.avgPrice.toLocaleString('en-US', {maximumFractionDigits: 2})}` : '$ 0.00';
+        function exportShiftHTML() {
+            const now = new Date();
+            const dateStr = now.toLocaleDateString('es-ES', { day: '2-digit', month: '2-digit', year: 'numeric' }).replace(/\//g, '-');
+            const filename = `Cierre_Turno_${dateStr}.html`;
 
-            document.getElementById('modalTitle').innerText = `🚀 DETALLE: ${currency}`;
-            document.getElementById('modalContent').innerHTML = `
-                <div class="flex justify-between items-center py-2 border-b border-gray-800">
-                    <span class="text-gray-400 font-medium">Inventario Actual:</span>
-                    <span class="font-bold text-white">${inv.qty.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}</span>
-                </div>
-                <div class="flex justify-between items-center py-2 border-b border-gray-800">
-                    <span class="text-gray-400 font-medium">Entrada Hoy:</span>
-                    <span class="font-bold text-blue-400">${boughtTodayVal.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}</span>
-                </div>
-                <div class="flex justify-between items-center py-2 border-b border-gray-800">
-                    <span class="text-gray-400 font-medium">Precio Medio Compra:</span>
-                    <span class="font-bold text-indigo-400">${displayAvgPrice}</span>
-                </div>
-                <div class="flex justify-between items-center py-2 border-b border-gray-800">
-                    <span class="text-gray-400 font-medium">Total Vendido:</span>
-                    <span class="font-bold text-rose-400">${soldTodayVal.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}</span>
-                </div>
-                <div class="flex justify-between items-center py-2">
-                    <span class="text-gray-400 font-medium">Ganancia Generada:</span>
-                    <span class="font-bold text-emerald-400">$ ${profitCurrency.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}</span>
-                </div>
-            `;
-            document.getElementById('detailModal').classList.remove('hidden');
-            document.getElementById('detailModal').classList.add('flex');
-        }
+            const summary = getFinancialSummary();
 
-        function closeModal() {
-            document.getElementById('detailModal').classList.remove('flex');
-            document.getElementById('detailModal').classList.add('hidden');
-        }
-
-        function openProfitModal() {
-            const profitContent = document.getElementById('profitModalContent');
-            profitContent.innerHTML = '';
-
-            const profitOps = operations.filter(op => (op.type === 'Venta' || op.type === 'Gasto') && op.profit !== 0);
-
-            if (profitOps.length === 0) {
-                profitContent.innerHTML = `<div class="text-center py-6 text-gray-400">No hay ventas ni gastos registrados que generen ganancias o pérdidas.</div>`;
-            } else {
-                profitOps.forEach(op => {
-                    let descText = '';
-                    let badgeClass = 'bg-emerald-950 text-emerald-400 border border-emerald-800/60';
-                    let sign = '+';
-
-                    if (op.type === 'Venta') {
-                        let avgPriceUsed = op.avgPriceUsed || 0;
-                        descText = `Venta de <b>${op.qty} ${op.currency}</b> a precio <b>${op.price}</b> (Costo medio: ${avgPriceUsed.toFixed(2)})`;
-                        if (op.profit < 0) {
-                            badgeClass = 'bg-rose-950 text-rose-400 border border-rose-800/60';
-                            sign = '';
-                        }
-                    } else if (op.type === 'Gasto') {
-                        badgeClass = 'bg-orange-950 text-orange-400 border border-orange-800/60';
-                        descText = `Gasto en <b>${op.currency}</b>`;
-                        sign = '';
-                    }
-
-                    profitContent.innerHTML += `
-                        <div class="flex justify-between items-center p-3 bg-gray-800/60 rounded-xl border border-gray-700/50">
-                            <div class="space-y-0.5">
-                                <span class="px-2 py-0.5 rounded text-[10px] font-bold ${badgeClass}">${op.type}</span>
-                                <p class="text-xs text-gray-300 mt-1">${descText}</p>
-                            </div>
-                            <span class="font-bold text-sm ${op.profit >= 0 ? 'text-emerald-400' : 'text-rose-400'} whitespace-nowrap">
-                                ${sign}$ ${op.profit.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}
-                            </span>
-                        </div>
-                    `;
-                });
-            }
-
-            document.getElementById('profitModal').classList.remove('hidden');
-            document.getElementById('profitModal').classList.add('flex');
-        }
-
-        function closeProfitModal() {
-            document.getElementById('profitModal').classList.remove('flex');
-            document.getElementById('profitModal').classList.add('hidden');
-        }
-
-        async function clearAllData() {
-            const confirmed = await showCustomConfirm(
-                "🚨 BORRAR TODO",
-                "¿ESTÁS SEGURO?<br><br>Se borrará el inventario, las operaciones, el capital y los préstamos de forma permanente.",
-                "Sí, borrar todo",
-                true
-            );
-
-            if (confirmed) {
-                operations = [];
-                initialCapital = 0;
-                inventory = {};
-                loans = {};
-                currencies.forEach(c => {
-                    inventory[c] = { qty: 0, totalCost: 0, avgPrice: 0, boughtToday: 0, soldTodayQty: 0 };
-                });
-                saveData();
-                document.getElementById('initialCapitalInput').value = '0';
-                render();
-                renderLoans();
-                showToast('Datos borrados exitosamente.', 'success');
-            }
-        }
-
-        async function exportShiftHTML() {
-            const confirmed = await showCustomConfirm(
-                "📄 EXPORTAR Y REINICIAR TURNO",
-                "¿Estás seguro de cerrar y exportar el turno?<br><br>• Se exportará el historial del turno.<br>• La tabla de operaciones quedará limpia para el nuevo día.<br>• El Total actual se convertirá en el nuevo Capital Inicial (INICIO).<br>• El inventario conservará cantidades y precios medios.<br>• Los préstamos y deudas se conservarán intactos.",
-                "Sí, exportar y reiniciar",
-                false
-            );
-
-            if (!confirmed) return;
-
-            let operationsRows = '';
-            if (operations.length === 0) {
-                operationsRows = `<tr><td colspan="5" style="padding: 8px; text-align: center; color: #6b7280;">No hay operaciones registradas</td></tr>`;
-            } else {
-                operations.forEach(op => {
-                    let detailText = op.price ? `$ ${op.price.toLocaleString('en-US', {maximumFractionDigits: 2})}` : (op.person ? `👤 ${op.person}` : '-');
-                    operationsRows += `
-                        <tr>
-                            <td style="padding: 6px 4px; border-bottom: 1px solid #e5e7eb; font-weight: bold; color: #111827; white-space: nowrap;">${op.type}</td>
-                            <td style="padding: 6px 4px; border-bottom: 1px solid #e5e7eb; color: #111827;">${op.currency}</td>
-                            <td style="padding: 6px 4px; border-bottom: 1px solid #e5e7eb; text-align: right; color: #111827; white-space: nowrap;">${op.qty.toLocaleString('en-US', {maximumFractionDigits: 2})}</td>
-                            <td style="padding: 6px 4px; border-bottom: 1px solid #e5e7eb; text-align: center; color: #111827; white-space: nowrap;">${detailText}</td>
-                            <td style="padding: 6px 4px; border-bottom: 1px solid #e5e7eb; text-align: right; font-weight: bold; color: #111827; white-space: nowrap;">$ ${op.total.toLocaleString('en-US', {maximumFractionDigits: 2})}</td>
-                        </tr>
-                    `;
-                });
-            }
-
-            let inventoryRows = '';
-            currencies.forEach(cur => {
-                const inv = inventory[cur];
-                if(inv && inv.qty > 0) {
-                    inventoryRows += `
-                        <tr>
-                            <td style="padding: 6px 4px; border-bottom: 1px solid #e5e7eb; font-weight: bold; color: #111827;">${cur}</td>
-                            <td style="padding: 6px 4px; border-bottom: 1px solid #e5e7eb; text-align: right; color: #111827; white-space: nowrap;">${inv.qty.toLocaleString('en-US', {minimumFractionDigits: 2})}</td>
-                            <td style="padding: 6px 4px; border-bottom: 1px solid #e5e7eb; text-align: right; color: #111827; white-space: nowrap;">$ ${inv.avgPrice.toLocaleString('en-US', {maximumFractionDigits: 2})}</td>
-                        </tr>
-                    `;
-                }
-            });
-
-            if (!inventoryRows) {
-                inventoryRows = `<tr><td colspan="3" style="padding: 8px; text-align: center; color: #6b7280;">Sin inventario activo</td></tr>`;
-            }
-
-            let loansRows = '';
-            const persons = Object.keys(loans);
-            if (persons.length === 0) {
-                loansRows = `<tr><td colspan="2" style="padding: 8px; text-align: center; color: #6b7280;">No hay deudas registradas</td></tr>`;
-            } else {
-                persons.forEach(person => {
-                    const balances = loans[person];
-                    let balanceStr = Object.keys(balances).filter(c => {
-                        const itm = balances[c];
-                        const val = (typeof itm === 'object' && itm !== null) ? itm.qty : itm;
-                        return val !== 0;
-                    }).map(c => {
-                        const itm = balances[c];
-                        const val = (typeof itm === 'object' && itm !== null) ? itm.qty : itm;
-                        const entry = (typeof itm === 'object' && itm !== null) ? ensureLoanLots(itm, itm.avgPrice || 0) : { qty: val, avgPrice: 0, lots: [] };
-                        const summary = getLoanLotSummary(entry);
-                        const avg = c === 'CUP' ? '' : ` · Promedio histórico: $ ${summary.avgPrice.toLocaleString('en-US', {maximumFractionDigits: 2})}`;
-                        const lots = c === 'CUP' || !summary.lots.length ? '' : ` · Lotes: ${summary.lots.map(l => `${l.qty.toLocaleString('en-US')} @ $${l.avgPrice.toLocaleString('en-US', {maximumFractionDigits: 2})}`).join(', ')}`;
-                        return `${c}: ${Math.abs(val).toLocaleString('en-US')} (${val > 0 ? 'Te debe' : 'Le debes'})${avg}${lots}`;
-                    }).join('<br>');
-                    
-                    if (balanceStr) {
-                        loansRows += `
-                            <tr>
-                                <td style="padding: 6px 4px; border-bottom: 1px solid #e5e7eb; font-weight: bold; color: #111827;">${person}</td>
-                                <td style="padding: 6px 4px; border-bottom: 1px solid #e5e7eb; color: #111827;">${balanceStr}</td>
-                            </tr>
-                        `;
-                    }
-                });
-            }
-
-            const todayDate = new Date().toLocaleDateString('es-ES', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
-            const fileDate = new Date().toISOString().split('T')[0];
-
-            const fullHTML = `<!DOCTYPE html>
+            const reportHTML = `
+<!DOCTYPE html>
 <html lang="es">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Reporte de Turno - ${fileDate}</title>
+    <title>Reporte de Cierre de Turno - ${dateStr}</title>
     <style>
-        * { box-sizing: border-box; }
-        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f9fafb; color: #111827; margin: 0; padding: 10px 4px; }
-        .container { max-width: 800px; margin: 0 auto; background: #ffffff; padding: 14px 10px; border-radius: 12px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1); }
-        h1 { text-align: center; color: #4f46e5; margin-bottom: 5px; font-size: 20px; }
-        .date { text-align: center; color: #4b5563; font-size: 13px; margin-bottom: 18px; }
-        h2 { border-bottom: 2px solid #e5e7eb; padding-bottom: 6px; margin-top: 18px; font-size: 14px; color: #1f2937; }
-        .table-responsive { overflow-x: auto; -webkit-overflow-scrolling: touch; width: 100%; }
-        table { width: 100%; border-collapse: collapse; margin-bottom: 15px; font-size: 11px; }
-        th { background-color: #f3f4f6; color: #374151; padding: 6px 4px; text-align: left; font-size: 10px; white-space: nowrap; }
-        td { padding: 6px 4px; border-bottom: 1px solid #e5e7eb; font-size: 11px; }
-        @media (min-width: 640px) {
-            body { padding: 20px; }
-            .container { padding: 30px; }
-            table { font-size: 13px; }
-            th { padding: 10px 12px; font-size: 12px; }
-            td { padding: 8px 12px; font-size: 13px; }
-            h1 { font-size: 24px; }
-            h2 { font-size: 16px; }
-        }
-        @media print {
-            body { background: none; padding: 0; }
-            .container { box-shadow: none; border: none; padding: 0; }
-        }
+        body { font-family: system-ui, -apple-system, sans-serif; padding: 20px; background: #0f172a; color: #f8fafc; }
+        .card { background: #1e293b; padding: 16px; border-radius: 12px; margin-bottom: 16px; border: 1px solid #334155; }
+        h1, h2 { margin-top: 0; }
+        table { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 13px; }
+        th, td { padding: 8px 12px; text-align: left; border-bottom: 1px solid #334155; }
+        th { background: #334155; }
     </style>
 </head>
 <body>
-    <div class="container">
-        <h1>Reporte de Turno</h1>
-        <div class="date">Fecha: ${todayDate}</div>
+    <h1>💱 Cierre de Turno - ${dateStr}</h1>
+    
+    <div class="card">
+        <h2>Resumen Financiero</h2>
+        <p><strong>CUP en Caja:</strong> $ ${summary.cashCUP.toLocaleString('en-US', {maximumFractionDigits: 2})}</p>
+        <p><strong>Valor Inventario:</strong> $ ${summary.inventoryValue.toLocaleString('en-US', {maximumFractionDigits: 2})}</p>
+        <p><strong>Por Cobrar (Préstamos):</strong> $ ${summary.receivables.toLocaleString('en-US', {maximumFractionDigits: 2})}</p>
+        <p><strong>Por Pagar (Deudas):</strong> $ ${summary.payables.toLocaleString('en-US', {maximumFractionDigits: 2})}</p>
+        <p><strong>Patrimonio Neto:</strong> $ ${summary.netWorth.toLocaleString('en-US', {maximumFractionDigits: 2})}</p>
+    </div>
 
-        <h2>Resumen de Caja</h2>
-        <div class="table-responsive">
-            <table>
-                <tr>
-                    <td style="padding: 6px 4px; border-bottom: 1px solid #e5e7eb;">Capital Inicial:</td>
-                    <td style="padding: 6px 4px; border-bottom: 1px solid #e5e7eb; text-align: right; font-weight: bold; white-space: nowrap;">$ ${initialCapital.toLocaleString('en-US')}</td>
-                </tr>
-                <tr>
-                    <td style="padding: 6px 4px; border-bottom: 1px solid #e5e7eb;">Ganancia Total:</td>
-                    <td style="padding: 6px 4px; border-bottom: 1px solid #e5e7eb; text-align: right; font-weight: bold; color: #059669; white-space: nowrap;">$ ${operations.reduce((acc, op) => acc + (op.profit || 0), 0).toLocaleString('en-US', {minimumFractionDigits: 2})}</td>
-                </tr>
-                <tr>
-                    <td style="padding: 6px 4px; border-bottom: 1px solid #e5e7eb;">Total Disponible (CUP):</td>
-                    <td style="padding: 6px 4px; border-bottom: 1px solid #e5e7eb; text-align: right; font-weight: bold; color: #e11d48; white-space: nowrap;">$ ${getAvailableCUP().toLocaleString('en-US', {maximumFractionDigits: 0})}</td>
-                </tr>
-            </table>
-        </div>
-
-        <h2>Historial de Operaciones</h2>
-        <div class="table-responsive">
-            <table>
-                <thead>
-                    <tr>
-                        <th>Operación</th>
-                        <th>Moneda</th>
-                        <th style="text-align: right;">Cantidad</th>
-                        <th style="text-align: center;">Precio / Detalle</th>
-                        <th style="text-align: right;">Total</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    ${operationsRows}
-                </tbody>
-            </table>
-        </div>
-
+    <div class="card">
         <h2>Inventario Final</h2>
-        <div class="table-responsive">
-            <table>
-                <thead>
-                    <tr>
-                        <th>Moneda</th>
-                        <th style="text-align: right;">Cantidad Final</th>
-                        <th style="text-align: right;">Precio Medio</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    ${inventoryRows}
-                </tbody>
-            </table>
-        </div>
+        <table>
+            <thead><tr><th>Moneda</th><th>Cantidad</th><th>Costo Promedio</th><th>Costo Total</th></tr></thead>
+            <tbody>
+                ${Object.entries(inventory).map(([cur, inv]) => `
+                    <tr><td><strong>${cur}</strong></td><td>${inv.qty.toLocaleString('en-US', {maximumFractionDigits: 2})}</td><td>$ ${inv.avgPrice.toFixed(2)}</td><td>$ ${inv.totalCost.toFixed(2)}</td></tr>
+                `).join('')}
+            </tbody>
+        </table>
+    </div>
 
-        <h2>Deudores / Préstamos</h2>
-        <div class="table-responsive">
-            <table>
-                <thead>
+    <div class="card">
+        <h2>Operaciones del Turno (${operations.length})</h2>
+        <table>
+            <thead><tr><th>Tipo</th><th>Moneda</th><th>Cantidad</th><th>Detalle</th><th>Total</th></tr></thead>
+            <tbody>
+                ${operations.map(op => `
                     <tr>
-                        <th>Persona</th>
-                        <th>Estado</th>
+                        <td><strong>${op.type}</strong></td>
+                        <td>${op.currency}</td>
+                        <td>${op.qty}</td>
+                        <td>${op.price ? '$ ' + op.price : op.person \vert{}\vert{} '-'}</td>                         <td>$ ${op.total ? op.total.toLocaleString('en-US') : 0}</td>
                     </tr>
-                </thead>
-                <tbody>
-                    ${loansRows}
-                </tbody>
-            </table>
-        </div>
+                `).join('')}
+            </tbody>
+        </table>
     </div>
 </body>
-</html>`;
+</html>
+            `;
 
-            const blob = new Blob([fullHTML], { type: 'text/html;charset=utf-8' });
-            const link = document.createElement('a');
-            link.href = URL.createObjectURL(blob);
-            link.download = `Reporte_Turno_${fileDate}.html`;
-            document.body.appendChild(link);
-            link.click();
-            document.body.removeChild(link);
-            URL.revokeObjectURL(link.href);
+            const blob = new Blob([reportHTML], { type: 'text/html' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = filename;
+            a.click();
+            URL.revokeObjectURL(url);
 
-            // Cierre de turno: primero congelamos el estado FINAL del turno como la
-            // nueva base. El total disponible pasa a ser el nuevo INICIO, mientras que
-            // inventario y deudas se conservan exactamente como están.
-            // Hacemos las copias ANTES de limpiar operations y las persistimos de forma
-            // explícita para que, si después se registra y se elimina una operación,
-            // siempre podamos volver a este estado y nunca a cero.
-            const nextInitialCapital = getAvailableCUP();
-            const nextDayStartInventory = cloneState(inventory);
-            const nextDayStartLoans = cloneState(loans);
-
-            initialCapital = nextInitialCapital;
-            document.getElementById('initialCapitalInput').value = initialCapital.toLocaleString('en-US');
-            dayStartInventory = nextDayStartInventory;
-            dayStartLoans = nextDayStartLoans;
+            dayStartInventory = cloneState(inventory);
+            dayStartLoans = cloneState(loans);
             operations = [];
-
-            currencies.forEach(c => {
-                if (inventory[c]) {
-                    inventory[c].boughtToday = 0;
-                    inventory[c].soldTodayQty = 0;
-                }
-            });
-
-            // Persistimos también las bases del nuevo turno explícitamente.
-            // saveData() las guarda igualmente, pero estas escrituras dejan claro que
-            // el snapshot es parte permanente del nuevo turno.
             saveData();
-            localStorage.setItem('initialCapital', String(initialCapital));
-            localStorage.setItem('dayStartInventory', JSON.stringify(dayStartInventory));
-            localStorage.setItem('dayStartLoans', JSON.stringify(dayStartLoans));
-            localStorage.setItem('operations', JSON.stringify(operations));
-            localStorage.setItem('inventory', JSON.stringify(inventory));
-            localStorage.setItem('loans', JSON.stringify(loans));
-
             render();
-            renderLoans();
+            showToast('Turno cerrado y reporte HTML descargado.', 'success');
+        }
 
-            showToast('Turno exportado y preparado para un nuevo día.', 'success');
+        async function clearAllData() {
+            const confirmed = await showCustomConfirm('🗑️ RESTABLECER TODO', '¿Estás seguro de que deseas borrar TODOS los datos (operaciones, inventario, deudas y capital inicial)? Esta acción no se puede deshacer.', 'Restablecer', true);
+            if (!confirmed) return;
+
+            localStorage.clear();
+            operations = [];
+            initialCapital = 0;
+            loans = {};
+            inventory = {};
+            currencies.forEach(c => {
+                inventory[c] = { qty: 0, totalCost: 0, avgPrice: 0, boughtToday: 0, soldTodayQty: 0 };
+            });
+            dayStartInventory = cloneState(inventory);
+            dayStartLoans = cloneState(loans);
+
+            document.getElementById('initialCapitalInput').value = '0';
+            saveData();
+            render();
+            if (document.getElementById('viewPrestamos') && !document.getElementById('viewPrestamos').classList.contains('hidden')) {
+                renderLoans();
+            }
+            showToast('Todos los datos han sido borrados.', 'success');
         }
     </script>
-
-<script id="visual-v2-runtime">
-(function(){
-  const apply = () => {
-    document.querySelectorAll('#operationsTableBody tr').forEach(row => {
-      if(row.dataset.visualized) return;
-      const txt=(row.textContent||'').toLowerCase();
-      let cls='border-l-2 ';
-      if(txt.includes('compra')) cls+='border-l-indigo-400';
-      else if(txt.includes('venta')) cls+='border-l-emerald-500';
-      else if(txt.includes('gasto')) cls+='border-l-amber-500';
-      else if(txt.includes('préstamo')) cls+='border-l-emerald-400';
-      else if(txt.includes('deuda')) cls+='border-l-rose-500';
-      else if(txt.includes('abono')) cls+='border-l-sky-400';
-      else cls+='border-l-gray-300';
-      row.className += ' '+cls; row.dataset.visualized='1';
-    });
-  };
-  const body=document.getElementById('operationsTableBody');
-  if(body){ new MutationObserver(apply).observe(body,{childList:true,subtree:true}); setTimeout(apply,100); }
-})();
-</script>
 </body>
 </html>
